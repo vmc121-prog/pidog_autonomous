@@ -1,313 +1,496 @@
 """
-Vision Module
-=============
-Runs in a background thread.
-  - Frame capture via OpenCV (CSI or USB camera)
-  - Object detection: YOLOv8n (preferred) or MobileNet-SSD TFLite fallback
-  - Face recognition: face_recognition library (dlib-based)
+Vision Viewer Server
+====================
+Streams the camera feed with detection overlays to a browser.
+Captures print() output and shows it as a live log panel.
 
-get_latest() returns the most recent VisionResult to the main loop.
-get_frame()  returns the most recent raw BGR frame (used by vision_viewer).
+Usage:
+    python vision_viewer.py [--port 5050] [--debug]
+
+Then open http://<robot-ip>:5050 on any machine on your network.
 """
 
 import threading
 import time
-import os
-import pickle
-from dataclasses import dataclass, field
-from typing import Optional, List, Tuple
+import sys
+import collections
+import argparse
+import logging
 
 import cv2
 import numpy as np
-import logging
+from flask import Flask, Response, render_template_string, jsonify
 
-# Logging is configured by main.py before this module is imported.
-# All we need here is a named logger.
-log = logging.getLogger("Vision")
+# ── Argument parsing ──────────────────────────────────────────────────────────
+parser = argparse.ArgumentParser()
+parser.add_argument("--port",  type=int, default=5050)
+parser.add_argument("--debug", action="store_true")
+args, _ = parser.parse_known_args()
 
-log.info("Vision module starting")
-
-# ── Optional imports ──────────────────────────────────────────────────────────
-YOLO_AVAILABLE = False
-try:
-    from ultralytics import YOLO
-    YOLO_AVAILABLE = True
-except ImportError:
-    pass
-
-FACE_REC_AVAILABLE = False
-try:
-    import face_recognition
-    FACE_REC_AVAILABLE = True
-except ImportError:
-    pass
-
-TFLITE_AVAILABLE = False
-try:
-    import tflite_runtime.interpreter as tflite
-    TFLITE_AVAILABLE = True
-except ImportError:
-    try:
-        import tensorflow.lite as tflite
-        TFLITE_AVAILABLE = True
-    except ImportError:
-        pass
+# ── Logging ───────────────────────────────────────────────────────────────────
+log = logging.getLogger("VisionViewer")
 
 
-@dataclass
-class Detection:
-    label: str
-    confidence: float
-    bbox: Tuple[int, int, int, int]   # x1, y1, x2, y2
-    is_person: bool = False
-    known_name: Optional[str] = None   # set if face recognised
+# ── Print interceptor — captures all print() calls ───────────────────────────
+class PrintCapture:
+    """Replaces sys.stdout so print() calls are captured AND still shown in terminal."""
+    MAX_LINES = 200
 
+    def __init__(self, original_stdout):
+        self._orig  = original_stdout
+        self._lock  = threading.Lock()
+        self._lines = collections.deque(maxlen=self.MAX_LINES)
 
-@dataclass
-class VisionResult:
-    detections: List[Detection] = field(default_factory=list)
-    frame_w: int = 640
-    frame_h: int = 480
-    timestamp: float = 0.0
-
-    @property
-    def persons(self):
-        return [d for d in self.detections if d.is_person]
-
-    @property
-    def known_persons(self):
-        return [d for d in self.detections if d.known_name]
-
-    @property
-    def primary_target(self) -> Optional[Detection]:
-        """Largest bounding box detection."""
-        if not self.detections:
-            return None
-        return max(self.detections, key=lambda d: (d.bbox[2]-d.bbox[0])*(d.bbox[3]-d.bbox[1]))
-
-
-FACES_DB = "faces/known_faces.pkl"
-INFERENCE_EVERY_N = 8   # run inference every N frames, track between
-
-
-class VisionModule:
-    def __init__(self, camera_index=0, width=640, height=480, model_path=None):
-        self._cam_idx  = camera_index
-        self._width    = width
-        self._height   = height
-        self._thread   = None
-        self._running  = False
-        self._lock     = threading.Lock()
-        self._latest   = VisionResult(timestamp=time.time())
-        self._latest_frame = None   # raw BGR frame for vision_viewer
-        self._frame_n  = 0
-
-        # Load detector
-        self._detector = self._init_detector(model_path)
-
-        # Load known faces
-        self._known_encodings = []
-        self._known_names     = []
-        self._load_faces()
-
-    # ── Public API ────────────────────────────────────────────────────────────
-
-    def start(self):
-        self._running = True
-        self._thread  = threading.Thread(target=self._loop, daemon=True)
-        self._thread.start()
-        log.info("Vision started.")
-
-    def stop(self):
-        self._running = False
-
-    def get_latest(self) -> VisionResult:
-        """Returns the most recent detection result."""
-        with self._lock:
-            return self._latest
-
-    def get_frame(self):
-        """Returns the most recent raw BGR frame, or None if not yet available.
-        Used by vision_viewer so it doesn't need to open the camera itself."""
-        with self._lock:
-            return self._latest_frame
-
-    def register_face(self, name: str, image_path: str):
-        """Add a known face from an image file."""
-        img = face_recognition.load_image_file(image_path)
-        encs = face_recognition.face_encodings(img)
-        if not encs:
-            log.warning(f"No face found in {image_path}")
-            return
-        self._known_encodings.append(encs[0])
-        self._known_names.append(name)
-        self._save_faces()
-        log.info(f"Registered face: {name}")
-
-    # ── Internal ──────────────────────────────────────────────────────────────
-
-    def _loop(self):
-        cap = cv2.VideoCapture(self._cam_idx)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  self._width)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._height)
-
-        if not cap.isOpened():
-            log.error("Could not open camera.")
-            return
-
-        while self._running:
-            ret, frame = cap.read()
-            if not ret:
-                time.sleep(0.05)
-                continue
-
-            # Always store the latest raw frame for vision_viewer
+    def write(self, text):
+        self._orig.write(text)
+        stripped = text.strip()
+        if stripped:
+            ts = time.strftime("%H:%M:%S")
             with self._lock:
-                self._latest_frame = frame.copy()
+                self._lines.append(f"[{ts}] {stripped}")
 
-            self._frame_n += 1
-            if self._frame_n % INFERENCE_EVERY_N != 0:
-                time.sleep(0.01)
-                continue
+    def flush(self):
+        self._orig.flush()
 
-            detections = []
-            if self._detector:
-                detections = self._detect(frame)
+    def get_lines(self):
+        with self._lock:
+            return list(self._lines)
 
-            if FACE_REC_AVAILABLE and self._known_encodings:
-                detections = self._recognise_faces(frame, detections)
 
-            result = VisionResult(
-                detections=detections,
-                frame_w=self._width,
-                frame_h=self._height,
-                timestamp=time.time(),
-            )
-            with self._lock:
-                self._latest = result
+print_capture = PrintCapture(sys.stdout)
+sys.stdout = print_capture
 
-        cap.release()
 
-    def _init_detector(self, model_path):
-        if YOLO_AVAILABLE:
-            mp = model_path or "yolov8n.pt"
-            log.info(f"Loading YOLOv8n ({mp})...")
-            try:
-                return ("yolo", YOLO(mp))
-            except Exception as e:
-                log.warning(f"YOLO load failed: {e}")
+# ── Frame buffer — shared between render thread and Flask ────────────────────
+class FrameBuffer:
+    def __init__(self):
+        self._lock  = threading.Lock()
+        self._frame = None  # JPEG bytes
 
-        if TFLITE_AVAILABLE:
-            mp = model_path or "models/mobilenet_ssd.tflite"
-            if os.path.exists(mp):
-                log.info(f"Loading MobileNet-SSD TFLite ({mp})...")
-                interp = tflite.Interpreter(model_path=mp)
-                interp.allocate_tensors()
-                return ("tflite", interp)
+    def set(self, jpeg_bytes):
+        with self._lock:
+            self._frame = jpeg_bytes
 
-        log.warning("No detector available — vision running without detection.")
-        return None
+    def get(self):
+        with self._lock:
+            return self._frame
 
-    def _detect(self, frame) -> List[Detection]:
-        kind, model = self._detector
-        detections  = []
 
-        if kind == "yolo":
-            results = model(frame, verbose=False, conf=0.45)[0]
-            for box in results.boxes:
-                x1, y1, x2, y2 = map(int, box.xyxy[0])
-                label = results.names[int(box.cls[0])]
-                conf  = float(box.conf[0])
-                detections.append(Detection(
-                    label=label,
-                    confidence=conf,
-                    bbox=(x1, y1, x2, y2),
-                    is_person=(label == "person"),
-                ))
+frame_buffer = FrameBuffer()
 
-        elif kind == "tflite":
-            detections = self._tflite_detect(frame, model)
 
-        return detections
+# ── Drawing helpers ───────────────────────────────────────────────────────────
+COLOURS = {
+    "person":  (0,   200, 100),
+    "cat":     (255, 180,   0),
+    "dog":     (0,   180, 255),
+    "default": (180,  60, 255),
+}
 
-    def _tflite_detect(self, frame, interp) -> List[Detection]:
-        in_details  = interp.get_input_details()
-        out_details = interp.get_output_details()
-        h, w = in_details[0]["shape"][1:3]
-        resized = cv2.resize(frame, (w, h))
-        inp     = np.expand_dims(resized, axis=0).astype(np.uint8)
-        interp.set_tensor(in_details[0]["index"], inp)
-        interp.invoke()
+def colour_for(label: str):
+    return COLOURS.get(label.lower(), COLOURS["default"])
 
-        boxes   = interp.get_tensor(out_details[0]["index"])[0]
-        classes = interp.get_tensor(out_details[1]["index"])[0]
-        scores  = interp.get_tensor(out_details[2]["index"])[0]
+def draw_detections(frame, vision_result):
+    """Draw bounding boxes, labels and confidence onto frame."""
+    overlay = frame.copy()
 
-        COCO_LABELS = {0: "person", 15: "cat", 16: "dog", 32: "sports ball",
-                       39: "bottle", 56: "chair", 57: "couch"}
+    for d in vision_result.detections:
+        x1, y1, x2, y2 = d.bbox
+        col = colour_for(d.label)
+
+        cv2.rectangle(overlay, (x1, y1), (x2, y2), col, 2)
+
+        name       = d.known_name or d.label
+        conf       = f"{d.confidence:.0%}"
+        label_text = f"{name}  {conf}"
+
+        font       = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.55
+        thickness  = 1
+        (tw, th), _ = cv2.getTextSize(label_text, font, font_scale, thickness)
+
+        pad = 4
+        lx1, ly1 = x1, max(0, y1 - th - pad * 2)
+        lx2, ly2 = x1 + tw + pad * 2, y1
+        cv2.rectangle(overlay, (lx1, ly1), (lx2, ly2), col, -1)
+        cv2.putText(overlay, label_text,
+                    (lx1 + pad, ly2 - pad),
+                    font, font_scale, (10, 10, 10), thickness, cv2.LINE_AA)
+
+        # Extra highlight for recognised faces
+        if d.known_name:
+            cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 255, 200), 3)
+
+    cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
+
+    # HUD
+    cv2.putText(frame, time.strftime("%H:%M:%S"),
+                (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1, cv2.LINE_AA)
+    cv2.putText(frame, f"{len(vision_result.detections)} detection(s)",
+                (8, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1, cv2.LINE_AA)
+
+    return frame
+
+
+def frame_to_jpeg(frame) -> bytes:
+    _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    return buf.tobytes()
+
+
+# ── Render loop — uses frames from VisionModule, no second camera open ────────
+def vision_render_loop(vision_module, fps=15):
+    """
+    Pulls the latest raw frame and detection result from VisionModule,
+    draws overlays, and pushes a JPEG into frame_buffer for Flask to serve.
+    Never opens the camera itself — VisionModule owns the camera.
+    """
+    interval = 1.0 / fps
+    log.info(f"Render loop started at {fps} fps")
+    print(f"[VisionViewer] Render loop started at {fps} fps")
+
+    while True:
+        t0 = time.time()
+        try:
+            frame = vision_module.get_frame()   # raw BGR from VisionModule
+            if frame is not None:
+                result = vision_module.get_latest()
+                drawn  = draw_detections(frame.copy(), result)
+                frame_buffer.set(frame_to_jpeg(drawn))
+        except Exception as e:
+            log.warning(f"Render loop error: {e}")
+
+        time.sleep(max(0, interval - (time.time() - t0)))
+
+
+# ── Flask app ─────────────────────────────────────────────────────────────────
+app = Flask(__name__)
+
+HTML = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PiDog Vision</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Exo+2:wght@300;600&display=swap');
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:       #0a0c0f;
+    --panel:    #10141a;
+    --border:   #1e2a38;
+    --accent:   #00e5a0;
+    --accent2:  #0af;
+    --warn:     #f0b429;
+    --text:     #c8d8e8;
+    --dim:      #4a6070;
+    --mono:     'Share Tech Mono', monospace;
+    --sans:     'Exo 2', sans-serif;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-weight: 300;
+    height: 100vh;
+    display: grid;
+    grid-template-rows: 48px 1fr;
+    grid-template-columns: 1fr 340px;
+    gap: 1px;
+    background-color: var(--border);
+    overflow: hidden;
+  }
+
+  header {
+    grid-column: 1 / -1;
+    background: var(--panel);
+    display: flex;
+    align-items: center;
+    padding: 0 20px;
+    gap: 16px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .logo {
+    font-family: var(--mono);
+    font-size: 15px;
+    color: var(--accent);
+    letter-spacing: 2px;
+    text-transform: uppercase;
+  }
+
+  .dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 8px var(--accent);
+    animation: pulse 2s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0.3; }
+  }
+
+  .status-bar {
+    margin-left: auto;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--dim);
+    letter-spacing: 1px;
+  }
+
+  .feed-panel {
+    background: #000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .feed-panel img {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+    display: block;
+  }
+
+  .corner {
+    position: absolute;
+    width: 20px; height: 20px;
+    border-color: var(--accent2);
+    border-style: solid;
+    opacity: 0.6;
+  }
+  .corner.tl { top: 12px; left: 12px;  border-width: 2px 0 0 2px; }
+  .corner.tr { top: 12px; right: 12px; border-width: 2px 2px 0 0; }
+  .corner.bl { bottom: 12px; left: 12px;  border-width: 0 0 2px 2px; }
+  .corner.br { bottom: 12px; right: 12px; border-width: 0 2px 2px 0; }
+
+  .scan-line {
+    position: absolute;
+    left: 0; right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, var(--accent2), transparent);
+    opacity: 0.3;
+    animation: scan 4s linear infinite;
+  }
+  @keyframes scan {
+    0%   { top: 0%; }
+    100% { top: 100%; }
+  }
+
+  .log-panel {
+    background: var(--panel);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .log-header {
+    padding: 10px 14px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--accent);
+    letter-spacing: 2px;
+    border-bottom: 1px solid var(--border);
+    text-transform: uppercase;
+    flex-shrink: 0;
+  }
+
+  #log-lines {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px 0;
+    font-family: var(--mono);
+    font-size: 11px;
+    line-height: 1.7;
+  }
+
+  #log-lines::-webkit-scrollbar { width: 4px; }
+  #log-lines::-webkit-scrollbar-track { background: transparent; }
+  #log-lines::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .log-line {
+    padding: 1px 14px;
+    border-left: 2px solid transparent;
+    color: var(--text);
+    word-break: break-all;
+    animation: fadeIn 0.2s ease;
+  }
+  @keyframes fadeIn { from { opacity: 0; transform: translateX(4px); } to { opacity: 1; } }
+
+  .log-line.new   { border-left-color: var(--accent); color: #fff; }
+  .log-line .ts   { color: var(--dim); margin-right: 6px; }
+  .log-line.warn  { color: var(--warn); }
+  .log-line.error { color: #f55; }
+
+  .log-footer {
+    padding: 6px 14px;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--dim);
+    border-top: 1px solid var(--border);
+    flex-shrink: 0;
+    display: flex;
+    justify-content: space-between;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="dot"></div>
+  <div class="logo">PiDog // Vision</div>
+  <div class="status-bar" id="status">CONNECTING...</div>
+</header>
+
+<div class="feed-panel">
+  <div class="corner tl"></div>
+  <div class="corner tr"></div>
+  <div class="corner bl"></div>
+  <div class="corner br"></div>
+  <div class="scan-line"></div>
+  <img id="feed" src="/stream" alt="Camera feed">
+</div>
+
+<div class="log-panel">
+  <div class="log-header">// stdout log</div>
+  <div id="log-lines"></div>
+  <div class="log-footer">
+    <span id="log-count">0 lines</span>
+    <span id="log-time">--:--:--</span>
+  </div>
+</div>
+
+<script>
+  const feed = document.getElementById('feed');
+  const status = document.getElementById('status');
+  const logLines = document.getElementById('log-lines');
+  const logCount = document.getElementById('log-count');
+  const logTime  = document.getElementById('log-time');
+
+  let lastLineCount = 0;
+  let autoScroll = true;
+
+  logLines.addEventListener('scroll', () => {
+    const atBottom = logLines.scrollHeight - logLines.scrollTop - logLines.clientHeight < 30;
+    autoScroll = atBottom;
+  });
+
+  feed.onload  = () => { status.textContent = 'LIVE'; status.style.color = 'var(--accent)'; };
+  feed.onerror = () => { status.textContent = 'NO SIGNAL'; status.style.color = '#f55'; };
+
+  async function fetchLogs() {
+    try {
+      const r = await fetch('/logs');
+      const data = await r.json();
+      const lines = data.lines;
+
+      if (lines.length !== lastLineCount) {
+        const frag = document.createDocumentFragment();
+        lines.forEach((line, i) => {
+          const div = document.createElement('div');
+          const isNew   = i >= lastLineCount;
+          const isWarn  = line.toLowerCase().includes('warn');
+          const isError = line.toLowerCase().includes('error') || line.toLowerCase().includes('failed');
+
+          div.className = 'log-line'
+            + (isNew   ? ' new'   : '')
+            + (isWarn  ? ' warn'  : '')
+            + (isError ? ' error' : '');
+
+          const match = line.match(/^(\[\d{2}:\d{2}:\d{2}\])\s(.*)$/);
+          if (match) {
+            div.innerHTML = `<span class="ts">${match[1]}</span>${match[2]}`;
+          } else {
+            div.textContent = line;
+          }
+          frag.appendChild(div);
+        });
+
+        logLines.innerHTML = '';
+        logLines.appendChild(frag);
+        lastLineCount = lines.length;
+        logCount.textContent = lines.length + ' lines';
+        if (autoScroll) logLines.scrollTop = logLines.scrollHeight;
+
+        setTimeout(() => {
+          document.querySelectorAll('.log-line.new').forEach(el => el.classList.remove('new'));
+        }, 1500);
+      }
+
+      logTime.textContent = new Date().toLocaleTimeString();
+    } catch(e) {
+      logTime.textContent = 'ERROR';
+    }
+  }
+
+  fetchLogs();
+  setInterval(fetchLogs, 1000);
+</script>
+</body>
+</html>
+"""
+
+@app.route("/")
+def index():
+    return render_template_string(HTML)
+
+@app.route("/stream")
+def stream():
+    def generate():
+        while True:
+            jpeg = frame_buffer.get()
+            if jpeg:
+                yield (b"--frame\r\n"
+                       b"Content-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n")
+            time.sleep(1 / 15)
+    return Response(generate(),
+                    mimetype="multipart/x-mixed-replace; boundary=frame")
+
+@app.route("/logs")
+def logs():
+    return jsonify(lines=print_capture.get_lines())
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+def start_viewer(vision_module, fps=15, port=None):
+    """
+    Call this from your main PiDog script AFTER creating your VisionModule.
+
+        from modules.vision_viewer import start_viewer
+        vm = VisionModule(camera_index=0)
+        vm.start()
+        threading.Thread(target=start_viewer, args=(vm,), daemon=True).start()
+    """
+    p = port or args.port
+
+    threading.Thread(
+        target=vision_render_loop,
+        args=(vision_module,),
+        kwargs={"fps": fps},
+        daemon=True,
+    ).start()
+
+    print(f"[VisionViewer] Web viewer at http://0.0.0.0:{p}")
+    print(f"[VisionViewer] Open http://<robot-ip>:{p} in your browser")
+    app.run(host="0.0.0.0", port=p, debug=False, threaded=True)
+
+
+if __name__ == "__main__":
+    # Standalone test — no camera needed, checks UI is working
+    print("[VisionViewer] Standalone test mode")
+
+    class FakeResult:
         detections = []
-        fh, fw = frame.shape[:2]
-        for i in range(len(scores)):
-            if scores[i] < 0.45:
-                continue
-            y1, x1, y2, x2 = boxes[i]
-            label = COCO_LABELS.get(int(classes[i]), f"obj_{int(classes[i])}")
-            detections.append(Detection(
-                label=label,
-                confidence=float(scores[i]),
-                bbox=(int(x1*fw), int(y1*fh), int(x2*fw), int(y2*fh)),
-                is_person=(label == "person"),
-            ))
-        return detections
 
-    def _recognise_faces(self, frame, detections: List[Detection]) -> List[Detection]:
-        small  = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
-        rgb    = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
-        locs   = face_recognition.face_locations(rgb)
-        encs   = face_recognition.face_encodings(rgb, locs)
+    class FakeVision:
+        def get_latest(self): return FakeResult()
+        def get_frame(self):  return None
 
-        for enc, loc in zip(encs, locs):
-            top, right, bottom, left = [v*2 for v in loc]
-            matches   = face_recognition.compare_faces(self._known_encodings, enc, tolerance=0.5)
-            distances = face_recognition.face_distance(self._known_encodings, enc)
-            name      = None
-            if any(matches):
-                best = int(np.argmin(distances))
-                if matches[best]:
-                    name = self._known_names[best]
-
-            # Try to attach to an existing person detection
-            merged = False
-            for d in detections:
-                if d.is_person:
-                    ox1, oy1, ox2, oy2 = d.bbox
-                    cx = (left + right) // 2
-                    cy = (top + bottom) // 2
-                    if ox1 <= cx <= ox2 and oy1 <= cy <= oy2:
-                        d.known_name = name
-                        merged = True
-                        break
-
-            if not merged:
-                detections.append(Detection(
-                    label="person",
-                    confidence=0.9,
-                    bbox=(left, top, right, bottom),
-                    is_person=True,
-                    known_name=name,
-                ))
-
-        return detections
-
-    def _load_faces(self):
-        if os.path.exists(FACES_DB):
-            with open(FACES_DB, "rb") as f:
-                data = pickle.load(f)
-                self._known_encodings = data.get("encodings", [])
-                self._known_names     = data.get("names", [])
-            log.info(f"Loaded {len(self._known_names)} known face(s): {self._known_names}")
-
-    def _save_faces(self):
-        os.makedirs("faces", exist_ok=True)
-        with open(FACES_DB, "wb") as f:
-            pickle.dump({"encodings": self._known_encodings, "names": self._known_names}, f)
+    start_viewer(FakeVision(), port=args.port)
