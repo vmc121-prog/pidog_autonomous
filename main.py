@@ -21,6 +21,9 @@ import cv2
 import numpy as np
 import logging
 
+
+os.environ["ALSA_LOG_LEVEL"] = "0"
+
 # Logging is configured by main.py before this module is imported.
 log = logging.getLogger("Vision")
 
