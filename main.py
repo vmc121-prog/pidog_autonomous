@@ -23,34 +23,26 @@ import os
 
 os.environ["ALSA_LOG_LEVEL"] = "0"
 
-# Logging is configured by main.py before this module is imported.
-log = logging.getLogger("Vision")
-
-from modules.vision_viewer   import start_viewer
-from modules.obstacle        import ObstacleModule
-from modules.follow          import FollowModule
-from modules.voice           import VoiceModule
-from modules.emotion         import EmotionModule
-from modules.mission         import MissionModule
-from modules.speech          import SpeechModule
-from modules.vision          import VisionModule
-from modules.logging_config  import setup_logging
-from modules.robot          import RobotController
-
-
-# Initialise and start
-robot = RobotController()
-robot.start()
-
 # ── Argument parsing ──────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser()
 parser.add_argument("--debug", action="store_true")
 args = parser.parse_args()
 
-# ── Logging ───────────────────────────────────────────────────────────────────
+# ── Logging (must be set up before any module imports that use logging) ────────
+from modules.logging_config import setup_logging
 setup_logging(level=logging.DEBUG if args.debug else logging.INFO)
 log = logging.getLogger("Main")
 log.info("Main starting")
+
+# ── Module imports ────────────────────────────────────────────────────────────
+from modules.vision_viewer import start_viewer
+from modules.obstacle      import ObstacleModule
+from modules.follow        import FollowModule
+from modules.voice         import VoiceModule
+from modules.emotion       import EmotionModule
+from modules.mission       import MissionModule
+from modules.speech        import SpeechModule
+from modules.vision        import VisionModule
 
 # ── PiDog import (falls back to mock if library not present) ──────────────────
 try:
@@ -84,14 +76,6 @@ def main():
     # Vision — single instance shared by all modules
     vm = VisionModule(camera_index=0)
     vm.start()
-
-    try:
-        while True:
-            robot.update()   # handles vision, tracking, announcements, logging
-            time.sleep(0.1)
-
-    except KeyboardInterrupt:
-        robot.stop()
 
     # Start web viewer in background so it doesn't block the main loop
     threading.Thread(
