@@ -5,114 +5,83 @@ import threading
 import pyttsx3
 from modules.vision import VisionModule, VisionResult
 
-# ── TTS Engine ────────────────────────────────────────────────────────────────
-tts = pyttsx3.init()
-tts.setProperty("rate", 160)
-_tts_lock = threading.Lock()
+class RobotController:
+    def __init__(self, width=640, height=480):
+        self.vision = VisionModule(width=width, height=height)
+        self._prev_labels = set()
+        self._last_announced: dict[str, float] = {}
+        self.ANNOUNCE_COOLDOWN = 10
 
-def speak(text: str):
-    """Non-blocking TTS announcement."""
-    def _speak():
-        with _tts_lock:
-            tts.say(text)
-            tts.runAndWait()
-    threading.Thread(target=_speak, daemon=True).start()
+        # TTS
+        self._tts = pyttsx3.init()
+        self._tts.setProperty("rate", 160)
+        self._tts_lock = threading.Lock()
 
-# ── Logging ───────────────────────────────────────────────────────────────────
-LOG_FILE = "detections.csv"
+    def start(self):
+        self.vision.start()
 
-def log_detection(label: str, confidence: float, known_name: str = None):
-    file_exists = os.path.exists(LOG_FILE)
-    with open(LOG_FILE, "a", newline="") as f:
-        writer = csv.writer(f)
-        if not file_exists:
-            writer.writerow(["timestamp", "label", "confidence", "known_name"])
-        writer.writerow([
-            time.strftime("%Y-%m-%d %H:%M:%S"),
-            label,
-            f"{confidence:.2f}",
-            known_name or ""
-        ])
+    def stop(self):
+        self.vision.stop()
 
-# ── Motor Control (stub — replace with your driver) ──────────────────────────
-def steer_towards(bbox, frame_w: int):
-    """
-    Turn robot to centre the target in frame.
-    bbox = (x1, y1, x2, y2)
-    Replace the print() calls with your actual motor commands.
-    """
-    x1, _, x2, _ = bbox
-    cx = (x1 + x2) / 2
-    centre = frame_w / 2
-    offset = cx - centre          # negative = target is left, positive = right
-    dead_zone = frame_w * 0.1    # 10% of frame width
+    def update(self):
+        """Call this every tick from your main loop."""
+        result: VisionResult = self.vision.get_latest()
 
-    if abs(offset) < dead_zone:
-        print("Motors: STRAIGHT")
-        # motors.forward()
-    elif offset < 0:
-        print(f"Motors: TURN LEFT  (offset {offset:.0f}px)")
-        # motors.left()
-    else:
-        print(f"Motors: TURN RIGHT (offset {offset:.0f}px)")
-        # motors.right()
+        # Track
+        target = result.primary_target
+        if target and target.is_person:
+            self._steer_towards(target.bbox, result.frame_w)
 
-# ── Announcement Throttle ─────────────────────────────────────────────────────
-last_announced: dict[str, float] = {}
-ANNOUNCE_COOLDOWN = 10  # seconds between repeat announcements
+        # Announce + log
+        current_labels = set()
+        for det in result.detections:
+            key = det.known_name or det.label
+            current_labels.add(key)
+            if key not in self._prev_labels:
+                msg = (
+                    f"I can see {det.known_name}" if det.known_name
+                    else "Unknown person detected" if det.is_person
+                    else f"I can see a {det.label}"
+                )
+                self._maybe_announce(key, msg)
+                self._log_detection(det.label, det.confidence, det.known_name)
 
-def maybe_announce(key: str, message: str):
-    now = time.time()
-    if now - last_announced.get(key, 0) > ANNOUNCE_COOLDOWN:
-        last_announced[key] = now
-        speak(message)
+        self._prev_labels = current_labels
 
-# ── Main Loop ─────────────────────────────────────────────────────────────────
-def main():
-    vision = VisionModule(width=640, height=480)
-    vision.start()
+    def _steer_towards(self, bbox, frame_w: int):
+        x1, _, x2, _ = bbox
+        cx = (x1 + x2) / 2
+        offset = cx - frame_w / 2
+        dead_zone = frame_w * 0.1
 
-    # Optional: register known faces before starting
-    # vision.register_face("Alice", "faces/alice.jpg")
+        if abs(offset) < dead_zone:
+            pass  # motors.forward()
+        elif offset < 0:
+            pass  # motors.left()
+        else:
+            pass  # motors.right()
 
-    print("Robot running. Press Ctrl+C to stop.")
-    prev_labels = set()
+    def _maybe_announce(self, key: str, message: str):
+        now = time.time()
+        if now - self._last_announced.get(key, 0) > self.ANNOUNCE_COOLDOWN:
+            self._last_announced[key] = now
+            threading.Thread(target=self._speak, args=(message,), daemon=True).start()
 
-    try:
-        while True:
-            result: VisionResult = vision.get_latest()
+    def _speak(self, text: str):
+        with self._tts_lock:
+            self._tts.say(text)
+            self._tts.runAndWait()
 
-            # ── Track primary target (largest detection) ──────────────────
-            target = result.primary_target
-            if target and target.is_person:
-                steer_towards(target.bbox, result.frame_w)
-
-            # ── Announce & log new detections ─────────────────────────────
-            current_labels = set()
-            for det in result.detections:
-                key = det.known_name or det.label
-                current_labels.add(key)
-
-                # Only announce/log if this is a new detection this cycle
-                if key not in prev_labels:
-                    if det.known_name:
-                        msg = f"I can see {det.known_name}"
-                    elif det.is_person:
-                        msg = "Unknown person detected"
-                    else:
-                        msg = f"I can see a {det.label}"
-
-                    maybe_announce(key, msg)
-                    log_detection(det.label, det.confidence, det.known_name)
-                    print(f"[DETECT] {msg} ({det.confidence:.0%})")
-
-            prev_labels = current_labels
-            time.sleep(0.1)
-
-    except KeyboardInterrupt:
-        print("Stopping...")
-    finally:
-        vision.stop()
-
-if __name__ == "__main__":
-    main()
+    def _log_detection(self, label, confidence, known_name=None):
+        log_file = "detections.csv"
+        file_exists = os.path.exists(log_file)
+        with open(log_file, "a", newline="") as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                writer.writerow(["timestamp", "label", "confidence", "known_name"])
+            writer.writerow([
+                time.strftime("%Y-%m-%d %H:%M:%S"),
+                label,
+                f"{confidence:.2f}",
+                known_name or ""
+            ])
