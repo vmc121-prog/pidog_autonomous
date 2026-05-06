@@ -25,7 +25,7 @@ os.environ["ALSA_LOG_LEVEL"] = "0"
 
 # Logging is configured by main.py before this module is imported.
 log = logging.getLogger("Vision")
-=======
+
 from modules.vision_viewer   import start_viewer
 from modules.obstacle        import ObstacleModule
 from modules.follow          import FollowModule
