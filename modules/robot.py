@@ -3,7 +3,7 @@ import csv
 import os
 import threading
 import pyttsx3
-from vision import VisionModule, VisionResult
+from modules.vision import VisionModule, VisionResult
 
 # ── TTS Engine ────────────────────────────────────────────────────────────────
 tts = pyttsx3.init()
