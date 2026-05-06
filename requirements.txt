@@ -1,0 +1,23 @@
+# PiDog Autonomous — Python dependencies
+# Install with: pip install -r requirements.txt --break-system-packages
+
+# Core vision
+opencv-python-headless>=4.8
+numpy>=1.24
+
+# Object detection (choose one — YOLOv8 recommended)
+ultralytics>=8.0          # YOLOv8n — downloads model on first run (~6MB)
+# tflite-runtime>=2.13    # lighter alternative (uncomment if YOLO is too slow)
+
+# Face recognition
+face-recognition>=1.3     # requires cmake + dlib (see INSTALL.md)
+
+# Voice / speech
+vosk>=0.3.45              # offline keyword recognition
+pyaudio>=0.2.13           # microphone input
+
+# Neural TTS (optional — nicer voice, ~500MB model)
+# TTS>=0.22               # Coqui TTS — uncomment to enable
+
+# pidog hardware library
+# pidog                   # install separately per SunFounder instructions
