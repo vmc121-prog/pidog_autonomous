@@ -19,8 +19,7 @@ import signal
 import sys
 import argparse
 import logging
-
-<<<<<<< HEAD
+import os
 
 os.environ["ALSA_LOG_LEVEL"] = "0"
 
@@ -36,7 +35,12 @@ from modules.mission         import MissionModule
 from modules.speech          import SpeechModule
 from modules.vision          import VisionModule
 from modules.logging_config  import setup_logging
->>>>>>> 1506951 (vc)
+from modules.robot.          import RobotController
+
+
+# Initialise and start
+robot = RobotController()
+robot.start()
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser()
@@ -80,6 +84,14 @@ def main():
     # Vision — single instance shared by all modules
     vm = VisionModule(camera_index=0)
     vm.start()
+
+    try:
+        while True:
+            robot.update()   # handles vision, tracking, announcements, logging
+            time.sleep(0.1)
+
+    except KeyboardInterrupt:
+        robot.stop()
 
     # Start web viewer in background so it doesn't block the main loop
     threading.Thread(
