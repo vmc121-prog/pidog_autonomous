@@ -17,6 +17,8 @@ import collections
 import argparse
 import logging
 
+logging.getLogger("werkzeug").setLevel(logging.WARNING)
+
 import cv2
 import numpy as np
 from flask import Flask, Response, render_template_string, jsonify
