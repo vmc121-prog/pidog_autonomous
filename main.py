@@ -35,7 +35,7 @@ from modules.mission         import MissionModule
 from modules.speech          import SpeechModule
 from modules.vision          import VisionModule
 from modules.logging_config  import setup_logging
-from modules.robot.          import RobotController
+from modules.robot          import RobotController
 
 
 # Initialise and start
