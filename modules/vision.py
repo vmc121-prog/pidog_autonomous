@@ -275,6 +275,7 @@ class VisionModule:
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
                 label = results.names[int(box.cls[0])]
                 conf  = float(box.conf[0])
+                log.info(f"YOLO detected {label} with confidence {conf:.2f}")
                 detections.append(Detection(
                     label=label,
                     confidence=conf,
