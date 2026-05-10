@@ -34,7 +34,7 @@ CLAP_THRESHOLD = 3000
 
 COMMANDS = {
     "hello":   (None,         "Hello there!",       5),
-    "sit":     ("sit",        "Sitting down.",       4),
+    "sit":     ("sit",        "Sitting down.",       1),
     "stand":   ("stand",      "Standing up.",        5),
     "come":    ("forward",    "Coming over.",        50),
     "stay":    ("stop",       "Staying put.",        4),
@@ -166,6 +166,7 @@ class VoiceModule(BaseModule):
                     self.dog.body_stop()
                 if str(action) == "stop":
                     self.dog.do_action("bark")
+                    
                     self.dog.body_stop()
                     
                     time.sleep(3.0)
