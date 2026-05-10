@@ -43,6 +43,7 @@ from modules.emotion       import EmotionModule
 from modules.mission       import MissionModule
 from modules.speech        import SpeechModule
 from modules.vision        import VisionModule
+from modules.lookback      import LookBackModule
 
 # ── PiDog import (falls back to mock if library not present) ──────────────────
 try:
@@ -91,9 +92,10 @@ def main():
     modules = [
         ObstacleModule(dog, speech,     priority=1),
         FollowModule(dog, speech, vm,   priority=2),
-        VoiceModule(dog, speech,        priority=3),
-        EmotionModule(dog, speech, vm,  priority=4),
-        MissionModule(dog, speech,      priority=5),
+        LookBackModule(dog, speech, vm, priority=3),
+        VoiceModule(dog, speech,        priority=4),
+        EmotionModule(dog, speech, vm,  priority=5),
+        MissionModule(dog, speech,      priority=6),
     ]
 
     # Start background threads
