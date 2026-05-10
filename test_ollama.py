@@ -6,7 +6,7 @@ WELCOME = "Hello, I am a helpful assistant. How can I help you?"
 # If Ollama runs on the same Raspberry Pi, use "localhost".
 # If it runs on another computer in your LAN, replace with that computer's IP address.
 llm = Ollama(
-    ip="192.167.1.178",
+    ip="192.168.1.178",
     model="qwen3-coder:30b"   # you can replace with any model
 )
 
