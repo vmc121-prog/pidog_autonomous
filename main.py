@@ -44,6 +44,7 @@ from modules.mission       import MissionModule
 from modules.speech        import SpeechModule
 from modules.vision        import VisionModule
 from modules.lookback      import LookBackModule
+from modules.head_tracking import HeadTrackingModule
 
 # ── PiDog import (falls back to mock if library not present) ──────────────────
 try:
