@@ -118,7 +118,7 @@ def main():
         while True:
             try:
                 cmd = command_queue.get(timeout=0.5)
-                log.info(f"Received command: "+cmd)
+                log.info(f"In main.py, received command: "+cmd)
                 if "sit"     in cmd: dog.sit()
                 elif "stand" in cmd: dog.stand()
                 elif "forward" in cmd: dog.trot(speed=50)

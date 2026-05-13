@@ -40,6 +40,8 @@ import sys
 import collections
 import argparse
 import logging
+# from action_command        import ActionCommandModule
+from modules.vision import VisionModule
 
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
@@ -807,6 +809,8 @@ if __name__ == "__main__":
             try:
                 cmd = command_queue.get(timeout=1)
                 print(f"[TEST] Command received: {cmd}")
+                # am = ActionCommandModule(dog=None, speech=None, command=cmd)
+                am.start()
             except queue.Empty:
                 pass
 
