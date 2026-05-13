@@ -43,8 +43,6 @@ from modules.emotion       import EmotionModule
 from modules.mission       import MissionModule
 from modules.speech        import SpeechModule
 from modules.vision        import VisionModule
-from modules.lookback      import LookBackModule
-from modules.head_tracking import HeadTrackingModule
 
 # ── PiDog import (falls back to mock if library not present) ──────────────────
 try:
@@ -65,6 +63,23 @@ class SensorEncoder(json.JSONEncoder):
             return obj.__dict__
         return str(obj)
 
+import queue, threading
+from modules.vision_viewer import start_viewer, command_queue
+
+def handle_commands(dog):
+    log
+    while True:
+        try:
+            cmd = command_queue.get(timeout=0.5)
+            log.info(f"Received command: "+cmd)
+            if "sit"     in cmd: dog.sit()
+            elif "stand" in cmd: dog.stand()
+            elif "forward" in cmd: dog.trot(speed=50)
+            elif "stop"   in cmd: dog.stop()
+        except queue.Empty:
+            pass
+
+threading.Thread(target=handle_commands, args=(dog,), daemon=True).start()
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
