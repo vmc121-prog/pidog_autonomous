@@ -119,10 +119,13 @@ def main():
             try:
                 cmd = command_queue.get(timeout=0.5)
                 log.info(f"In main.py, received command: "+cmd)
-                if "sit"     in cmd: dog.sit()
-                elif "stand" in cmd: dog.stand()
-                elif "forward" in cmd: dog.trot(speed=50)
-                elif "stop"   in cmd: dog.stop()
+                if "sit"     in cmd: dog.do_action('sit', speed=60)
+                elif "stand" in cmd: dog.do_action('stand', speed=60)
+                elif "forward" in cmd: dog.do_action('trot', speed=50)
+                elif "stop"   in cmd: dog.do_action('stop', speed=60)
+                else:
+                    log.warning(f"In main.py, unknown command received: {cmd}")
+                    dog.do_action("w")
             except queue.Empty:
                 pass
 
