@@ -755,7 +755,7 @@ def command():
     log.info("Received command via /command endpoint")
     data = request.get_json(silent=True) or {}
     text = data.get("text", "").strip()
-    log.info(f"Received command: "+ data + " / "+text)
+    log.info(f"Received command: "+ str(data) + " / "+str(text) )
     if text:
         print(f"[VoiceCmd] {text}")
         command_queue.put(text)
