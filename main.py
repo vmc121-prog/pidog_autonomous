@@ -35,7 +35,7 @@ log = logging.getLogger("Main")
 log.info("Main starting")
 
 # ── Module imports ────────────────────────────────────────────────────────────
-from modules.vision_viewer import start_viewer
+# from modules.vision_viewer import start_viewer
 from modules.obstacle      import ObstacleModule
 from modules.follow        import FollowModule
 from modules.voice         import VoiceModule
@@ -43,6 +43,7 @@ from modules.emotion       import EmotionModule
 from modules.mission       import MissionModule
 from modules.speech        import SpeechModule
 from modules.vision        import VisionModule
+from modules.vision_viewer import start_viewer, command_queue
 
 # ── PiDog import (falls back to mock if library not present) ──────────────────
 try:
@@ -66,20 +67,7 @@ class SensorEncoder(json.JSONEncoder):
 import queue, threading
 from modules.vision_viewer import start_viewer, command_queue
 
-def handle_commands(dog):
-    log
-    while True:
-        try:
-            cmd = command_queue.get(timeout=0.5)
-            log.info(f"Received command: "+cmd)
-            if "sit"     in cmd: dog.sit()
-            elif "stand" in cmd: dog.stand()
-            elif "forward" in cmd: dog.trot(speed=50)
-            elif "stop"   in cmd: dog.stop()
-        except queue.Empty:
-            pass
 
-threading.Thread(target=handle_commands, args=(dog,), daemon=True).start()
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
@@ -124,7 +112,20 @@ def main():
 
     # ── Graceful shutdown handler ─────────────────────────────────────────────
     running = True
+    def handle_commands(dog):
+        log
+        while True:
+            try:
+                cmd = command_queue.get(timeout=0.5)
+                log.info(f"Received command: "+cmd)
+                if "sit"     in cmd: dog.sit()
+                elif "stand" in cmd: dog.stand()
+                elif "forward" in cmd: dog.trot(speed=50)
+                elif "stop"   in cmd: dog.stop()
+            except queue.Empty:
+                pass
 
+    threading.Thread(target=handle_commands, args=(dog,), daemon=True).start()
     def _shutdown(sig, frame):
         nonlocal running
         print("\n[INFO] Shutting down...")
