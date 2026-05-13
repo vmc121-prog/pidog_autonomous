@@ -38,6 +38,7 @@ log.info("Main starting")
 # from modules.vision_viewer import start_viewer
 from modules.obstacle      import ObstacleModule
 from modules.follow        import FollowModule
+from modules.lookback        import LookBackModule
 from modules.voice         import VoiceModule
 from modules.emotion       import EmotionModule
 from modules.mission       import MissionModule
