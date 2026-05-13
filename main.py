@@ -125,7 +125,7 @@ def main():
                 elif "stop"   in cmd: dog.do_action('stop', speed=60)
                 else:
                     log.warning(f"In main.py, unknown command received: {cmd}")
-                    dog.do_action("w")
+                    dog.do_action("wag tail", speed=50)
             except queue.Empty:
                 pass
 
