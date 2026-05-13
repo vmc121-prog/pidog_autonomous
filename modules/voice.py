@@ -34,7 +34,7 @@ CLAP_THRESHOLD = 3000
 
 COMMANDS = {
     "hello":   (None,         "Hello there!",       5),
-    "sit":     ("sit",        "Sitting down.",       4),
+    "sit":     ("sit",        "Sitting down.",       1),
     "stand":   ("stand",      "Standing up.",        5),
     "come":    ("forward",    "Coming over.",        50),
     "stay":    ("stop",       "Staying put.",        4),
@@ -157,8 +157,21 @@ class VoiceModule(BaseModule):
                 self.speech.say(phrase, priority=pri)
                 if str(action) == "forward":
                     self.dog.do_action("forward", speed=70)
+                    self.dog.rgb_strip.set_mode('breath', 'white', bps=0.5)
+                    self.dog.do_action('forward', step_count=2, speed=98)
+                    self.dog.do_action('shake_head', step_count=1, speed=80)
+                    self.dog.do_action('wag_tail', step_count=5, speed=99)
                     time.sleep(3.0)
-                    self.dog.do_action("stop")
+                    # self.dog.do_action("stop")
+                    self.dog.body_stop()
+                if str(action) == "stop":
+                    self.dog.do_action("bark")
+                    
+                    self.dog.body_stop()
+                    
+                    time.sleep(3.0)
+                    # self.dog.do_action("stop")
+                    self.dog.body_stop()
                 elif action:
                     self.dog.do_action(action, speed=60)
 

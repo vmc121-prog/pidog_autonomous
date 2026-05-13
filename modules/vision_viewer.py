@@ -17,6 +17,8 @@ import collections
 import argparse
 import logging
 
+logging.getLogger("werkzeug").setLevel(logging.WARNING)
+
 import cv2
 import numpy as np
 from flask import Flask, Response, render_template_string, jsonify
@@ -165,7 +167,7 @@ def vision_render_loop(vision_module, fps=15):
 # ── Flask app ─────────────────────────────────────────────────────────────────
 app = Flask(__name__)
 
-HTML = """
+HTML = r"""
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -405,6 +407,7 @@ HTML = """
             + (isError ? ' error' : '');
 
           const match = line.match(/^(\[\d{2}:\d{2}:\d{2}\])\s(.*)$/);
+
           if (match) {
             div.innerHTML = `<span class="ts">${match[1]}</span>${match[2]}`;
           } else {
