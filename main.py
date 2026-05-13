@@ -108,9 +108,11 @@ def main():
     modules = [
         ObstacleModule(dog, speech,     priority=1),
         FollowModule(dog, speech, vm,   priority=2),
-        VoiceModule(dog, speech,        priority=3),
-        EmotionModule(dog, speech, vm,  priority=4),
-        MissionModule(dog, speech,      priority=5),
+        LookBackModule(dog, speech, vm, priority=3),
+        HeadTrackingModule(dog, speech, vm, priority=3.5),
+        VoiceModule(dog, speech,        priority=4),
+        EmotionModule(dog, speech, vm,  priority=5),
+        MissionModule(dog, speech,      priority=6),
     ]
 
     # Start background threads
