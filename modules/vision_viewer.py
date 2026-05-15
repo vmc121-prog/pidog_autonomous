@@ -19,18 +19,19 @@ Consuming voice commands in your main script
 --------------------------------------------
     from modules.vision_viewer import start_viewer, command_queue
 
-    def handle_commands(dog):
+    # Option A — let the viewer handle commands automatically via PiDogActionModule
+    start_viewer(vision_module, dog=my_dog)
+
+    # Option B — handle commands yourself via command_queue (old behaviour)
+    def handle_commands():
         while True:
             try:
                 cmd = command_queue.get(timeout=0.5)
-                if "sit"     in cmd: dog.sit()
-                elif "stand" in cmd: dog.stand()
-                elif "forward" in cmd: dog.forward(...)
-                # etc.
+                ...
             except queue.Empty:
                 pass
-
-    threading.Thread(target=handle_commands, args=(dog,), daemon=True).start()
+    threading.Thread(target=handle_commands, daemon=True).start()
+    start_viewer(vision_module)          # dog=None → no auto-execution
 """
 
 import queue
@@ -40,8 +41,8 @@ import sys
 import collections
 import argparse
 import logging
-# from action_command        import ActionCommandModule
 from modules.vision import VisionModule
+from modules.pidog_actions import PiDogActionModule, COMMAND_MAP
 
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
@@ -58,8 +59,11 @@ args, _ = parser.parse_known_args()
 # ── Logging ───────────────────────────────────────────────────────────────────
 log = logging.getLogger("VisionViewer")
 
-# ── Command queue — consume this in your main PiDog script ───────────────────
+# ── Command queue — still populated for any external consumers ────────────────
 command_queue = queue.Queue()
+
+# ── Action module — set by start_viewer() when dog= is provided ──────────────
+_action_module: PiDogActionModule | None = None
 
 
 # ── Print interceptor — captures all print() calls ───────────────────────────
@@ -195,6 +199,9 @@ def vision_render_loop(vision_module, fps=15):
 
 # ── Flask app ─────────────────────────────────────────────────────────────────
 app = Flask(__name__)
+
+# Build a sorted, de-duplicated list of recognisable command phrases for the UI
+_KNOWN_COMMANDS = sorted(set(COMMAND_MAP.keys()))
 
 HTML = r"""
 <!DOCTYPE html>
@@ -335,7 +342,21 @@ HTML = r"""
     border-bottom: 1px solid var(--border);
     text-transform: uppercase;
     flex-shrink: 0;
+    display: flex;
+    gap: 10px;
+    align-items: center;
   }
+
+  .log-tab {
+    cursor: pointer;
+    padding: 2px 8px;
+    border-radius: 4px;
+    opacity: 0.45;
+    transition: opacity 0.2s, background 0.2s;
+    font-size: 10px;
+  }
+  .log-tab:hover  { opacity: 0.8; }
+  .log-tab.active { opacity: 1; background: rgba(0,229,160,0.1); }
 
   #log-lines {
     flex: 1;
@@ -364,6 +385,47 @@ HTML = r"""
   .log-line.warn  { color: var(--warn); }
   .log-line.error { color: var(--danger); }
   .log-line.cmd   { border-left-color: var(--accent2); color: var(--accent2); }
+  .log-line.action { border-left-color: var(--accent); color: var(--accent); }
+  .log-line.sound { border-left-color: var(--warn); color: var(--warn); }
+
+  /* ── Commands reference panel ── */
+  #cmd-ref {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px 14px;
+    display: none;
+  }
+  #cmd-ref.visible { display: block; }
+  #cmd-ref::-webkit-scrollbar { width: 4px; }
+  #cmd-ref::-webkit-scrollbar-track { background: transparent; }
+  #cmd-ref::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  .cmd-section-title {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--accent);
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin: 10px 0 4px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 4px;
+  }
+
+  .cmd-chip {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 10px;
+    padding: 2px 7px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    color: var(--text);
+    margin: 2px 2px;
+    cursor: pointer;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .cmd-chip:hover { border-color: var(--accent2); color: var(--accent2); }
+  .cmd-chip.sound { border-color: rgba(240,180,41,0.35); color: var(--warn); }
+  .cmd-chip.sound:hover { border-color: var(--warn); }
 
   .log-footer {
     padding: 6px 14px;
@@ -389,7 +451,6 @@ HTML = r"""
     overflow: hidden;
   }
 
-  /* animated listening background glow */
   .voice-bar::before {
     content: '';
     position: absolute;
@@ -441,7 +502,6 @@ HTML = r"""
     50%       { box-shadow: 0 0 8px var(--accent); }
   }
 
-  /* waveform bars — shown while listening */
   .waveform {
     display: flex;
     align-items: center;
@@ -482,7 +542,6 @@ HTML = r"""
   .voice-status.listening { color: var(--accent); }
   .voice-status.error     { color: var(--danger); }
 
-  /* last-command chip */
   .last-cmd {
     font-family: var(--mono);
     font-size: 11px;
@@ -501,8 +560,12 @@ HTML = r"""
     color: var(--accent2);
     background: rgba(0,170,255,0.08);
   }
+  .last-cmd.unknown {
+    border-color: var(--danger);
+    color: var(--danger);
+    background: rgba(255,85,85,0.08);
+  }
 
-  /* no-speech-api warning */
   .no-api-warn {
     font-family: var(--mono);
     font-size: 11px;
@@ -532,8 +595,17 @@ HTML = r"""
 </div>
 
 <div class="log-panel">
-  <div class="log-header">// stdout log</div>
+  <div class="log-header">
+    <span class="log-tab active" id="tab-log"   onclick="switchTab('log')">LOG</span>
+    <span class="log-tab"        id="tab-cmds"  onclick="switchTab('cmds')">COMMANDS</span>
+  </div>
+
+  <!-- stdout log -->
   <div id="log-lines"></div>
+
+  <!-- command reference -->
+  <div id="cmd-ref"></div>
+
   <div class="log-footer">
     <span id="log-count">0 lines</span>
     <span id="log-time">--:--:--</span>
@@ -542,7 +614,7 @@ HTML = r"""
 
 <!-- Voice command bar -->
 <div class="voice-bar" id="voiceBar">
-  <button class="mic-btn" id="micBtn" onclick="toggleVoice()" title="Hold to speak a command">
+  <button class="mic-btn" id="micBtn" onclick="toggleVoice()" title="Click to speak a command">
     🎤
   </button>
   <div class="waveform" id="waveform">
@@ -554,6 +626,51 @@ HTML = r"""
 </div>
 
 <script>
+  // ── Command reference data injected from server ───────────────────────────
+  const KNOWN_COMMANDS = {{ known_commands|tojson }};
+
+  // ── Tab switching ─────────────────────────────────────────────────────────
+  function switchTab(tab) {
+    const logEl  = document.getElementById('log-lines');
+    const cmdEl  = document.getElementById('cmd-ref');
+    const tabLog = document.getElementById('tab-log');
+    const tabCmd = document.getElementById('tab-cmds');
+
+    if (tab === 'log') {
+      logEl.style.display = '';
+      cmdEl.classList.remove('visible');
+      tabLog.classList.add('active');
+      tabCmd.classList.remove('active');
+    } else {
+      logEl.style.display = 'none';
+      cmdEl.classList.add('visible');
+      tabLog.classList.remove('active');
+      tabCmd.classList.add('active');
+      if (!cmdEl.dataset.built) buildCommandRef();
+    }
+  }
+
+  function buildCommandRef() {
+    const el = document.getElementById('cmd-ref');
+    el.dataset.built = '1';
+    fetch('/commands')
+      .then(r => r.json())
+      .then(data => {
+        let html = '';
+        // Actions section
+        html += '<div class="cmd-section-title">🐾 Actions</div>';
+        data.actions.forEach(cmd => {
+          html += `<span class="cmd-chip" title="Say: ${cmd}" onclick="sendCommand('${cmd}')">${cmd}</span>`;
+        });
+        // Sounds section
+        html += '<div class="cmd-section-title" style="margin-top:14px">🔊 Sounds</div>';
+        data.sounds.forEach(cmd => {
+          html += `<span class="cmd-chip sound" title="Say: ${cmd}" onclick="sendCommand('${cmd}')">${cmd}</span>`;
+        });
+        el.innerHTML = html;
+      });
+  }
+
   // ── Feed ──────────────────────────────────────────────────────────────────
   const feed   = document.getElementById('feed');
   const status = document.getElementById('status');
@@ -580,20 +697,23 @@ HTML = r"""
       if (lines.length !== lastLineCount) {
         const frag = document.createDocumentFragment();
         lines.forEach((line, i) => {
-          const div    = document.createElement('div');
-          const isNew  = i >= lastLineCount;
-          const isWarn = line.toLowerCase().includes('warn');
-          const isErr  = line.toLowerCase().includes('error') || line.toLowerCase().includes('failed');
-          const isCmd  = line.includes('[VoiceCmd]');
+          const div     = document.createElement('div');
+          const isNew   = i >= lastLineCount;
+          const isWarn  = line.toLowerCase().includes('warn');
+          const isErr   = line.toLowerCase().includes('error') || line.toLowerCase().includes('failed');
+          const isCmd   = line.includes('[VoiceCmd]');
+          const isAction= line.includes('[PiDogActions] ACTION');
+          const isSound = line.includes('[PiDogActions] SOUND');
 
           div.className = 'log-line'
-            + (isNew  ? ' new'   : '')
-            + (isWarn ? ' warn'  : '')
-            + (isErr  ? ' error' : '')
-            + (isCmd  ? ' cmd'   : '');
+            + (isNew    ? ' new'    : '')
+            + (isWarn   ? ' warn'   : '')
+            + (isErr    ? ' error'  : '')
+            + (isCmd    ? ' cmd'    : '')
+            + (isAction ? ' action' : '')
+            + (isSound  ? ' sound'  : '');
 
           const match = line.match(/^(\[\d{2}:\d{2}:\d{2}\])\s(.*)$/);
-
           if (match) {
             div.innerHTML = `<span class="ts">${match[1]}</span>${match[2]}`;
           } else {
@@ -633,11 +753,10 @@ HTML = r"""
   let listening = false;
 
   if (!SpeechRec) {
-    // Replace bar contents with a warning — browser doesn't support API
     voiceBar.innerHTML = `
       <div class="no-api-warn">
-        ⚠ Web Speech API not available — use Chrome or Edge.
-        For network access use an SSH tunnel: <br>
+        ⚠ Web Speech API not available — use Chrome or Edge.<br>
+        For network access use an SSH tunnel:<br>
         <code>ssh -L 5050:localhost:5050 pi@&lt;robot-ip&gt;</code>
         then open <code>http://localhost:5050</code>
       </div>`;
@@ -645,12 +764,12 @@ HTML = r"""
 
   function setListeningUI(on) {
     listening = on;
-    micBtn.className    = 'mic-btn' + (on ? ' listening' : '');
-    voiceBar.className  = 'voice-bar' + (on ? ' listening' : '');
-    waveform.className  = 'waveform' + (on ? ' active' : '');
+    micBtn.className      = 'mic-btn' + (on ? ' listening' : '');
+    voiceBar.className    = 'voice-bar' + (on ? ' listening' : '');
+    waveform.className    = 'waveform' + (on ? ' active' : '');
     voiceStatus.className = 'voice-status' + (on ? ' listening' : '');
     voiceStatus.textContent = on ? 'LISTENING...' : 'VOICE READY — CLICK MIC';
-    micBtn.textContent = on ? '⏹' : '🎤';
+    micBtn.textContent    = on ? '⏹' : '🎤';
   }
 
   function setErrorUI(msg) {
@@ -673,9 +792,16 @@ HTML = r"""
         body: JSON.stringify({ text }),
       });
       const data = await r.json();
-      lastCmdEl.textContent = '"' + text + '"';
-      lastCmdEl.className   = 'last-cmd flash';
-      setTimeout(() => { lastCmdEl.className = 'last-cmd'; }, 2000);
+
+      if (data.matched) {
+        lastCmdEl.textContent = '"' + text + '"';
+        lastCmdEl.className   = 'last-cmd flash';
+        setTimeout(() => { lastCmdEl.className = 'last-cmd'; }, 2000);
+      } else {
+        lastCmdEl.textContent = '? ' + text;
+        lastCmdEl.className   = 'last-cmd unknown';
+        setTimeout(() => { lastCmdEl.className = 'last-cmd'; }, 3000);
+      }
     } catch(e) {
       setErrorUI('SEND FAILED');
     }
@@ -692,13 +818,9 @@ HTML = r"""
     recog.onend    = () => setListeningUI(false);
     recog.onerror  = (e) => {
       setListeningUI(false);
-      if (e.error === 'not-allowed') {
-        setErrorUI('MIC ACCESS DENIED');
-      } else if (e.error === 'no-speech') {
-        setErrorUI('NO SPEECH DETECTED');
-      } else {
-        setErrorUI('ERROR: ' + e.error.toUpperCase());
-      }
+      if (e.error === 'not-allowed')  setErrorUI('MIC ACCESS DENIED');
+      else if (e.error === 'no-speech') setErrorUI('NO SPEECH DETECTED');
+      else setErrorUI('ERROR: ' + e.error.toUpperCase());
     };
 
     recog.onresult = (e) => {
@@ -706,11 +828,8 @@ HTML = r"""
       if (text) sendCommand(text);
     };
 
-    try {
-      recog.start();
-    } catch(e) {
-      setErrorUI('COULD NOT START MIC');
-    }
+    try { recog.start(); }
+    catch(e) { setErrorUI('COULD NOT START MIC'); }
   }
 
   function stopListening() {
@@ -729,7 +848,7 @@ HTML = r"""
 
 @app.route("/")
 def index():
-    return render_template_string(HTML)
+    return render_template_string(HTML, known_commands=_KNOWN_COMMANDS)
 
 @app.route("/stream")
 def stream():
@@ -747,36 +866,72 @@ def stream():
 def logs():
     return jsonify(lines=print_capture.get_lines())
 
+@app.route("/commands")
+def commands():
+    """
+    Returns all known voice commands grouped by type (action / sound),
+    used by the COMMANDS tab in the UI.
+    """
+    from modules.pidog_actions import COMMAND_MAP
+    action_cmds = sorted(k for k, v in COMMAND_MAP.items() if v[0] == "action")
+    sound_cmds  = sorted(k for k, v in COMMAND_MAP.items() if v[0] == "sound")
+    return jsonify(actions=action_cmds, sounds=sound_cmds)
+
 @app.route("/command", methods=["POST"])
 def command():
     """
     Receives a voice command from the browser as JSON: {"text": "sit down"}
-    Puts the text on command_queue for the main script to consume.
-    Returns: {"status": "ok", "received": "<text>"}
+    1. Puts the text on command_queue (for any external consumers).
+    2. If an action module is configured, executes the action directly.
+    Returns: {"status": "ok", "received": "<text>", "matched": true/false}
     """
-    log.info("Received command via /command endpoint")
     data = request.get_json(silent=True) or {}
     text = data.get("text", "").strip()
-    log.info(f"Received command: "+ str(data) + " / "+str(text) )
-    if text:
-        print(f"[VoiceCmd] {text}")
-        command_queue.put(text)
-        return jsonify(status="ok", received=text)
-    return jsonify(status="empty", error="No text received"), 400
+    if not text:
+        return jsonify(status="empty", error="No text received"), 400
+
+    print(f"[VoiceCmd] {text}")
+    command_queue.put(text)
+
+    matched = False
+    if _action_module is not None:
+        matched = _action_module.execute(text)
+    else:
+        # No action module — just log it; external consumer handles the queue
+        log.info(f"No action module configured; command queued: '{text}'")
+
+    return jsonify(status="ok", received=text, matched=matched)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
-def start_viewer(vision_module, fps=15, port=None):
+def start_viewer(vision_module, dog=None, fps=15, port=None):
     """
     Call this from your main PiDog script AFTER creating your VisionModule.
 
         from modules.vision_viewer import start_viewer, command_queue
-        vm = VisionModule(camera_index=0)
+        vm  = VisionModule(camera_index=0)
         vm.start()
-        threading.Thread(target=start_viewer, args=(vm,), daemon=True).start()
+        dog = Pidog()
 
-    Voice commands arrive on command_queue as lowercase strings.
+        # Pass dog= to enable automatic voice-command execution:
+        threading.Thread(
+            target=start_viewer,
+            args=(vm,),
+            kwargs={"dog": dog},
+            daemon=True,
+        ).start()
+
+    Voice commands also arrive on command_queue for any additional handling.
+    If dog=None, commands are only queued (original behaviour).
     """
+    global _action_module
+
+    if dog is not None:
+        _action_module = PiDogActionModule(dog)
+        print("[VisionViewer] PiDogActionModule attached — voice commands will execute automatically")
+    else:
+        print("[VisionViewer] No dog instance provided — commands queued only")
+
     p = port or args.port
 
     threading.Thread(
@@ -793,7 +948,6 @@ def start_viewer(vision_module, fps=15, port=None):
 
 
 if __name__ == "__main__":
-    # Standalone test — no camera needed, checks UI + voice button are working
     print("[VisionViewer] Standalone test mode")
 
     class FakeResult:
@@ -803,16 +957,14 @@ if __name__ == "__main__":
         def get_latest(self): return FakeResult()
         def get_frame(self):  return None
 
-    # Print queued commands so you can verify the endpoint works
     def _print_commands():
         while True:
             try:
                 cmd = command_queue.get(timeout=1)
-                print(f"[TEST] Command received: {cmd}")
-                # am = ActionCommandModule(dog=None, speech=None, command=cmd)
-                am.start()
+                print(f"[TEST] Command dequeued: {cmd}")
             except queue.Empty:
                 pass
 
     threading.Thread(target=_print_commands, daemon=True).start()
-    start_viewer(FakeVision(), port=args.port)
+    # Pass dog=None for dry-run — PiDogActionModule will log but not move anything
+    start_viewer(FakeVision(), dog=None, port=args.port)
