@@ -1,7 +1,7 @@
 """
 Action Command Module: 
 ======================
-
+vc
 This module implements pidog actions only. It is called from vision_viewer and voice.py to execute commands. It is not part of the behavior arbitration loop and does not have a priority. It is a direct command interface for external control of the robot.
 """
 
