@@ -77,6 +77,7 @@ COMMAND_MAP: dict[str, tuple[str, str]] = {
 
     "sit":                  ("action", "sit"),
     "sit down":             ("action", "sit"),
+    "set":                  ("action", "sit"),   # Vosk mishearing of "sit"
 
     "lie":                  ("action", "lie"),
     "lie down":             ("action", "lie"),
@@ -156,6 +157,7 @@ COMMAND_MAP: dict[str, tuple[str, str]] = {
     "pant":                 ("sound", "pant"),
     "panting":              ("sound", "pant"),
     "bark":                 ("sound", "single_bark_1"),
+    "bark bark":            ("sound", "single_bark_1"),   # Vosk doubling
     "single bark":          ("sound", "single_bark_1"),
     "single bark 1":        ("sound", "single_bark_1"),
     "single bark 2":        ("sound", "single_bark_2"),
@@ -202,6 +204,12 @@ class PiDogActionModule:
         Returns True if a matching command was found, False otherwise.
         """
         key = voice_text.strip().lower()
+
+        # Collapse repeated words: "bark bark" → "bark", "sit sit" → "sit"
+        words = key.split()
+        if len(words) >= 2 and len(set(words)) == 1:
+            key = words[0]
+
         entry = COMMAND_MAP.get(key)
 
         if entry is None:
