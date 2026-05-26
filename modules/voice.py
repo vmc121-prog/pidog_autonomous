@@ -9,18 +9,17 @@ from modules import BaseModule
 from vosk import Model, KaldiRecognizer
 import pyaudio
 from modules.logging_config import setup_logging
+from modules.pidog_actions import COMMAND_MAP
 import logging
-import argparse, logging
+import argparse
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--debug", action="store_true")
 args = parser.parse_args()
 
 setup_logging(level=logging.DEBUG if args.debug else logging.INFO)
-# setup_logging()           # call once at startup
 
 log = logging.getLogger("Voice")
-
 log.info("Voice module starting")
 
 
@@ -32,6 +31,10 @@ CHUNK        = 2048
 
 CLAP_THRESHOLD = 3000
 
+# Legacy command map — kept for clap detection speech responses and any
+# behaviour-module specific overrides (forward, stop, etc).
+# Voice commands that aren't in here fall through to PiDogActionModule
+# via the vision_viewer command_queue, so nothing is lost.
 COMMANDS = {
     "hello":   (None,         "Hello there!",       5),
     "sit":     ("sit",        "Sitting down.",       1),
@@ -43,6 +46,12 @@ COMMANDS = {
     "patrol":  ("patrol",     "Starting patrol.",    6),
     "stop":    ("stop",       "Stopping.",           4),
 }
+
+# Build the full grammar from COMMAND_MAP (pidog_actions) plus the legacy
+# COMMANDS keys — deduplicated, sorted, Vosk-friendly single words/phrases.
+# Vosk handles multi-word phrases in the grammar list just fine.
+_ALL_GRAMMAR_WORDS = sorted(set(list(COMMAND_MAP.keys()) + list(COMMANDS.keys())))
+log.debug(f"Full grammar word list ({len(_ALL_GRAMMAR_WORDS)} entries): {_ALL_GRAMMAR_WORDS}")
 
 
 class VoiceModule(BaseModule):
@@ -63,7 +72,7 @@ class VoiceModule(BaseModule):
 
         self._clap_window    = 1.5
         self._last_clap      = 0
-        self._resample_state = None   # audioop resampler state
+        self._resample_state = None
 
     # -------------------------
     # DEVICE SELECTION
@@ -89,7 +98,6 @@ class VoiceModule(BaseModule):
             print("[Voice] No mic found")
             return
 
-        # FIX 1: open at 48000 Hz - the only rate the HAT supports
         try:
             self._stream = self._pa.open(
                 format=pyaudio.paInt16,
@@ -103,12 +111,14 @@ class VoiceModule(BaseModule):
             print(f"[Voice] Mic open failed: {e}")
             return
 
-        # FIX 2: restrict grammar to command words only - much better accuracy
         model = Model(VOSK_MODEL_PATH)
         self._vosk_rec = KaldiRecognizer(model, SAMPLE_RATE)
-        grammar = json.dumps(list(COMMANDS.keys()) + ["[unk]"])
+
+        # Set the expanded grammar — all action + sound command phrases
+        grammar = json.dumps(_ALL_GRAMMAR_WORDS + ["[unk]"])
         self._vosk_rec.SetGrammar(grammar)
-        log.info(f"[Voice] Grammar restricted to: {list(COMMANDS.keys())}")
+        log.info(f"[Voice] Grammar restricted to {len(_ALL_GRAMMAR_WORDS)} commands")
+        log.debug(f"[Voice] Grammar: {_ALL_GRAMMAR_WORDS}")
 
         self._running_audio = True
         self._audio_thread  = threading.Thread(
@@ -152,6 +162,8 @@ class VoiceModule(BaseModule):
         # Voice commands
         while not self._command_queue.empty():
             cmd = self._command_queue.get()
+
+            # Legacy COMMANDS — behaviour-module overrides with custom speech/logic
             if cmd in COMMANDS:
                 action, phrase, pri = COMMANDS[cmd]
                 self.speech.say(phrase, priority=pri)
@@ -162,18 +174,23 @@ class VoiceModule(BaseModule):
                     self.dog.do_action('shake_head', step_count=1, speed=80)
                     self.dog.do_action('wag_tail', step_count=5, speed=99)
                     time.sleep(3.0)
-                    # self.dog.do_action("stop")
                     self.dog.body_stop()
-                if str(action) == "stop":
+                elif str(action) == "stop":
                     self.dog.do_action("bark")
-                    
                     self.dog.body_stop()
-                    
                     time.sleep(3.0)
-                    # self.dog.do_action("stop")
                     self.dog.body_stop()
                 elif action:
                     self.dog.do_action(action, speed=60)
+
+            # Extended commands — delegate to PiDogActionModule via command_queue
+            elif cmd in COMMAND_MAP:
+                log.info(f"[Voice] Delegating '{cmd}' to PiDogActionModule")
+                from modules.vision_viewer import command_queue
+                command_queue.put(cmd)
+
+            else:
+                log.warning(f"[Voice] Unrecognised command: '{cmd}'")
 
     # -------------------------
     # SINGLE AUDIO PIPELINE
@@ -197,7 +214,7 @@ class VoiceModule(BaseModule):
                 else:
                     self._last_clap = now
 
-            # FIX 3: resample 48000 -> 16000 before passing to Vosk
+            # Resample 48000 -> 16000 before passing to Vosk
             resampled, self._resample_state = audioop.ratecv(
                 raw, 2, 1,
                 CAPTURE_RATE, SAMPLE_RATE,
@@ -209,10 +226,23 @@ class VoiceModule(BaseModule):
                 text   = result.get("text", "").strip().lower()
 
                 if text and text != "[unk]":
-                    print(f"[Voice] Recognised: {text}")
-                    for keyword in COMMANDS:
-                        if keyword in text:
-                            print(f"[Voice] Command: {text} -> {keyword}")
-                            self._command_queue.put(keyword)
-                            break
+                    print(f"[Voice] Recognised: '{text}'")
 
+                    # Try longest match first so "lie down" beats "lie"
+                    matched = None
+                    for phrase in sorted(COMMAND_MAP.keys(), key=len, reverse=True):
+                        if phrase in text:
+                            matched = phrase
+                            break
+                    # Fall back to legacy single-word COMMANDS if no match above
+                    if matched is None:
+                        for keyword in COMMANDS:
+                            if keyword in text:
+                                matched = keyword
+                                break
+
+                    if matched:
+                        print(f"[Voice] Command: '{text}' → '{matched}'")
+                        self._command_queue.put(matched)
+                    else:
+                        print(f"[Voice] No command match for: '{text}'")
