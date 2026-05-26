@@ -76,7 +76,6 @@ COMMAND_MAP: dict[str, tuple[str, str]] = {
     "up":                   ("action", "stand"),
 
     "sit":                  ("action", "sit"),
-    "set":                  ("action", "sit"),
     "sit down":             ("action", "sit"),
 
     "lie":                  ("action", "lie"),
@@ -262,23 +261,10 @@ class PiDogActionModule:
             except Exception as e:
                 log.warning(f"head_move failed: {e}")
 
-        # Call the action method on the dog object
-        method = getattr(self._dog, name, None)
-        if method is None:
-            log.error(f"PiDog has no method '{name}'")
-            print(f"[PiDogActions] ERROR: dog has no method '{name}'")
-            return
-
+        # All PiDog actions go through do_action()
         try:
-            method(speed=speed)
+            self._dog.do_action(name, speed=speed)
             self._dog.wait_all_done()
-        except TypeError:
-            # Some methods don't accept a speed kwarg
-            try:
-                method()
-                self._dog.wait_all_done()
-            except Exception as e:
-                log.error(f"Action '{name}' raised: {e}")
         except Exception as e:
             log.error(f"Action '{name}' raised: {e}")
 
@@ -303,7 +289,11 @@ class PiDogActionModule:
             return
 
         try:
-            self._dog.speak(name)
+            # PiDog plays sounds via sound_effect_play(); fall back to speak()
+            if hasattr(self._dog, "sound_effect_play"):
+                self._dog.sound_effect_play(name)
+            else:
+                self._dog.speak(name)
         except Exception as e:
             log.error(f"Sound '{name}' raised: {e}")
 
