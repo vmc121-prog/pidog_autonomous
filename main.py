@@ -35,10 +35,9 @@ log = logging.getLogger("Main")
 log.info("Main starting")
 
 # ── Module imports ────────────────────────────────────────────────────────────
-# from modules.vision_viewer import start_viewer
 from modules.obstacle      import ObstacleModule
 from modules.follow        import FollowModule
-from modules.lookback        import LookBackModule
+from modules.lookback      import LookBackModule
 from modules.voice         import VoiceModule
 from modules.emotion       import EmotionModule
 from modules.mission       import MissionModule
@@ -65,10 +64,6 @@ class SensorEncoder(json.JSONEncoder):
             return obj.__dict__
         return str(obj)
 
-import queue, threading
-from modules.vision_viewer import start_viewer, command_queue
-
-
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
@@ -83,10 +78,12 @@ def main():
     vm = VisionModule(camera_index=0)
     vm.start()
 
-    # Start web viewer in background so it doesn't block the main loop
+    # Start web viewer in background — pass dog= so voice commands execute
+    # automatically via PiDogActionModule without any handling needed here.
     threading.Thread(
         target=start_viewer,
         args=(vm,),
+        kwargs={"dog": dog},
         daemon=True,
     ).start()
 
@@ -98,7 +95,6 @@ def main():
         ObstacleModule(dog, speech,     priority=1),
         FollowModule(dog, speech, vm,   priority=2),
         LookBackModule(dog, speech, vm, priority=3),
-        # HeadTrackingModule(dog, speech, vm, priority=3.5),
         VoiceModule(dog, speech,        priority=4),
         EmotionModule(dog, speech, vm,  priority=5),
         MissionModule(dog, speech,      priority=6),
@@ -113,23 +109,7 @@ def main():
 
     # ── Graceful shutdown handler ─────────────────────────────────────────────
     running = True
-    def handle_commands(dog):
-        log
-        while True:
-            try:
-                cmd = command_queue.get(timeout=0.5)
-                log.info(f"In main.py, received command: "+cmd)
-                if "sit"     in cmd: dog.do_action('sit', speed=60)
-                elif "stand" in cmd: dog.do_action('stand', speed=60)
-                elif "forward" in cmd: dog.do_action('trot', speed=50)
-                elif "stop"   in cmd: dog.do_action('stop', speed=60)
-                else:
-                    log.warning(f"In main.py, unknown command received: {cmd}")
-                    dog.do_action("wag tail", speed=50)
-            except queue.Empty:
-                pass
 
-    threading.Thread(target=handle_commands, args=(dog,), daemon=True).start()
     def _shutdown(sig, frame):
         nonlocal running
         print("\n[INFO] Shutting down...")
