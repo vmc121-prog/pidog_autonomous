@@ -76,6 +76,7 @@ COMMAND_MAP: dict[str, tuple[str, str]] = {
     "up":                   ("action", "stand"),
 
     "sit":                  ("action", "sit"),
+    "set":                  ("action", "sit"),
     "sit down":             ("action", "sit"),
 
     "lie":                  ("action", "lie"),
